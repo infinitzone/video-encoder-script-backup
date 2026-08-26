@@ -118,20 +118,35 @@ server {
             access_log off;
         }
 
-        # Media segments
+        # Media segments (mpegts legacy + fMP4)
         location ~* \.ts$ {
             add_header Cache-Control "public, max-age=31536000, immutable";
             add_header Access-Control-Allow-Origin * always;
-            types {
-                video/mp2t ts;
-            }
+            types { video/mp2t ts; }
             default_type video/mp2t;
             access_log off;
             log_not_found off;
         }
 
-        # Block everything else under /hls/ (no raw mp4, no scripts, etc.)
-        location ~* \.(mp4|webm|mkv|mov|php|sh|exe|json|js|html)$ {
+        location ~* \.m4s$ {
+            add_header Cache-Control "public, max-age=31536000, immutable";
+            add_header Access-Control-Allow-Origin * always;
+            default_type video/iso.segment;
+            access_log off;
+            log_not_found off;
+        }
+
+        # fMP4 init segment (init.mp4 inside each quality folder)
+        location ~* /hls/.+/init\.mp4$ {
+            add_header Cache-Control "public, max-age=31536000, immutable";
+            add_header Access-Control-Allow-Origin * always;
+            default_type video/mp4;
+            access_log off;
+            log_not_found off;
+        }
+
+        # Block other non-stream files under /hls/
+        location ~* \.(webm|mkv|mov|php|sh|exe|json|js|html)$ {
             return 404;
         }
     }

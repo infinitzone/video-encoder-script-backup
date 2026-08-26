@@ -104,7 +104,69 @@ async function probeVideo(filePath) {
     hasAudio: Boolean(audioStream),
     codec: videoStream.codec_name,
     bitrate: parseInt(data.format.bit_rate, 10) || 0,
-  };
+  };/**
+ * Production-grade multi-resolution HLS video encoder
+ * ---------------------------------------------------
+ * - Creates 240p / 360p / 720p / 1080p (only those ≤ source height)
+ * - Outputs HLS segments + master playlist
+ * - Leaves the original video.mp4 untouched
+ * - Safe to call from upload pipeline (auto) or manually by videoId
+ *
+ * Directory layout after encoding:
+ *   object-storage/videos/{videoId}/
+ *     ├── video.mp4          (original – untouched)
+ *     ├── thumbnail.jpg
+ *     ├── master.m3u8        (adaptive bitrate master)
+ *     ├── 240p/
+ *     │   ├── index.m3u8
+ *     │   └── seg_000.ts …
+ *     ├── 360p/
+ *     │   └── …
+ *     ├── 720p/
+ *     └── 1080p/
+ */
+
+'use strict';
+
+const { spawn } = require('child_process');
+const fs = require('fs').promises;
+const path = require('path');
+const { promisify } = require('util');
+const { execFile } = require('child_process');
+const execFileAsync = promisify(execFile);
+
+// ---------------------------------------------------------------------------
+// Configuration – tweak for your hardware / quality targets
+// ---------------------------------------------------------------------------
+const CONFIG = {
+  // Absolute base path of your object storage videos folder
+  VIDEOS_ROOT: process.env.VIDEOS_ROOT ||
+    '/home/hridoy/Secret_Project/server/object-storage/videos',
+
+  // Source filename inside each video folder
+  SOURCE_FILENAME: 'video.mp4',
+
+  // HLS segment length in seconds
+  SEGMENT_DURATION: 4,
+
+  // Encoding preset: ultrafast | superfast | veryfast | faster | fast | medium | slow
+  // "faster" is a good production balance; use "medium" for higher quality
+  PRESET: process.env.FFMPEG_PRESET || 'faster',
+
+  // Number of ffmpeg threads (leave headroom for the Node process)
+  THREADS: Math.max(1, Math.min(4, require('os').cpus().length - 1)),
+
+  // Variant ladder – ordered low → high
+  // height, video bitrate (kbps), audio bitrate (kbps), maxrate, bufsize
+  VARIANTS: [
+    { name: '240p',  height: 240,  vBitrate: 400,  aBitrate: 64,  maxrate: 450,  bufsize: 800  },
+    { name: '360p',  height: 360,  vBitrate: 800,  aBitrate: 96,  maxrate: 900,  bufsize: 1600 },
+    { name: '720p',  height: 720,  vBitrate: 2500, aBitrate: 128, maxrate: 2800, bufsize: 5000 },
+    { name: '1080p', height: 1080, vBitrate: 5000, aBitrate: 192, maxrate: 5500, bufsize: 10000 },
+  ],
+};
+
+}
 }
 
 /**
@@ -120,14 +182,17 @@ function selectVariants(sourceHeight) {
  */
 function buildVariantArgs(sourcePath, outDir, variant, hasAudio) {
   const playlist = path.join(outDir, 'index.m3u8');
-  const segmentPattern = path.join(outDir, 'seg_%03d.ts');
+  // fMP4 segments: timeline starts at 0 (mpegts often starts ~1.4s and breaks seek-to-0)
+  const segmentPattern = path.join(outDir, 'seg_%03d.m4s');
+  const initFile = path.join(outDir, 'init.mp4');
 
-  // Scale to exact height, keep aspect ratio, force even dimensions
   const scaleFilter = `scale=-2:${variant.height}:flags=lanczos`;
+  const gop = CONFIG.SEGMENT_DURATION * 30;
 
   const args = [
     '-hide_banner',
-    '-y',                          // overwrite existing (idempotent re-encode)
+    '-y',
+    '-fflags', '+genpts',
     '-i', sourcePath,
     '-vf', scaleFilter,
     '-c:v', 'libx264',
@@ -137,11 +202,14 @@ function buildVariantArgs(sourcePath, outDir, variant, hasAudio) {
     '-b:v', `${variant.vBitrate}k`,
     '-maxrate', `${variant.maxrate}k`,
     '-bufsize', `${variant.bufsize}k`,
-    '-g', String(CONFIG.SEGMENT_DURATION * 30), // keyframe every segment (~30fps)
-    '-keyint_min', String(CONFIG.SEGMENT_DURATION * 30),
-    '-sc_threshold', '0',          // disable scene-change keyframes for consistent segments
+    '-g', String(gop),
+    '-keyint_min', String(gop),
+    '-sc_threshold', '0',
+    '-force_key_frames', `expr:gte(t,n_forced*${CONFIG.SEGMENT_DURATION})`,
     '-pix_fmt', 'yuv420p',
     '-threads', String(CONFIG.THREADS),
+    '-movflags', '+faststart',
+    '-avoid_negative_ts', 'make_zero',
   ];
 
   if (hasAudio) {
@@ -159,8 +227,11 @@ function buildVariantArgs(sourcePath, outDir, variant, hasAudio) {
     '-f', 'hls',
     '-hls_time', String(CONFIG.SEGMENT_DURATION),
     '-hls_playlist_type', 'vod',
+    '-hls_segment_type', 'fmp4',
+    '-hls_fmp4_init_filename', 'init.mp4',
     '-hls_segment_filename', segmentPattern,
     '-hls_flags', 'independent_segments',
+    '-hls_list_size', '0',
     playlist,
   );
 
@@ -204,7 +275,69 @@ function runFfmpeg(args, label) {
  * Write the master playlist that references all variants
  */
 async function writeMasterPlaylist(videoDir, variants, hasAudio) {
-  const lines = [
+  const lines = [/**
+ * Production-grade multi-resolution HLS video encoder
+ * ---------------------------------------------------
+ * - Creates 240p / 360p / 720p / 1080p (only those ≤ source height)
+ * - Outputs HLS segments + master playlist
+ * - Leaves the original video.mp4 untouched
+ * - Safe to call from upload pipeline (auto) or manually by videoId
+ *
+ * Directory layout after encoding:
+ *   object-storage/videos/{videoId}/
+ *     ├── video.mp4          (original – untouched)
+ *     ├── thumbnail.jpg
+ *     ├── master.m3u8        (adaptive bitrate master)
+ *     ├── 240p/
+ *     │   ├── index.m3u8
+ *     │   └── seg_000.ts …
+ *     ├── 360p/
+ *     │   └── …
+ *     ├── 720p/
+ *     └── 1080p/
+ */
+
+'use strict';
+
+const { spawn } = require('child_process');
+const fs = require('fs').promises;
+const path = require('path');
+const { promisify } = require('util');
+const { execFile } = require('child_process');
+const execFileAsync = promisify(execFile);
+
+// ---------------------------------------------------------------------------
+// Configuration – tweak for your hardware / quality targets
+// ---------------------------------------------------------------------------
+const CONFIG = {
+  // Absolute base path of your object storage videos folder
+  VIDEOS_ROOT: process.env.VIDEOS_ROOT ||
+    '/home/hridoy/Secret_Project/server/object-storage/videos',
+
+  // Source filename inside each video folder
+  SOURCE_FILENAME: 'video.mp4',
+
+  // HLS segment length in seconds
+  SEGMENT_DURATION: 4,
+
+  // Encoding preset: ultrafast | superfast | veryfast | faster | fast | medium | slow
+  // "faster" is a good production balance; use "medium" for higher quality
+  PRESET: process.env.FFMPEG_PRESET || 'faster',
+
+  // Number of ffmpeg threads (leave headroom for the Node process)
+  THREADS: Math.max(1, Math.min(4, require('os').cpus().length - 1)),
+
+  // Variant ladder – ordered low → high
+  // height, video bitrate (kbps), audio bitrate (kbps), maxrate, bufsize
+  VARIANTS: [
+    { name: '240p',  height: 240,  vBitrate: 400,  aBitrate: 64,  maxrate: 450,  bufsize: 800  },
+    { name: '360p',  height: 360,  vBitrate: 800,  aBitrate: 96,  maxrate: 900,  bufsize: 1600 },
+    { name: '720p',  height: 720,  vBitrate: 2500, aBitrate: 128, maxrate: 2800, bufsize: 5000 },
+    { name: '1080p', height: 1080, vBitrate: 5000, aBitrate: 192, maxrate: 5500, bufsize: 10000 },
+  ],
+};
+
+}
     '#EXTM3U',
     '#EXT-X-VERSION:3',
   ];

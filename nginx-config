@@ -1,0 +1,152 @@
+# Upstream: Your Node.js app
+upstream node_app {
+    server 127.0.0.1:4444;
+    keepalive 64;
+}
+
+server {
+    listen 80 default_server;
+    server_name _;   # replace with your domain or IP
+
+    # -------------------------------------------------
+    # 1. Internal video location – only via X-Accel-Redirect
+    #    (unchanged – still used for progressive / raw video.mp4)
+    # -------------------------------------------------
+    location /internal-videos/ {
+        internal;
+        alias /home/hridoy/Secret_Project/server/object-storage/videos/;
+        sendfile           on;
+        tcp_nopush         on;
+        tcp_nodelay        on;
+        output_buffers     1 2m;
+        directio           off;
+        add_header Accept-Ranges  bytes always;
+        add_header Cache-Control  "private, no-store" always;
+        access_log off;
+        log_not_found off;
+    }
+
+    # -------------------------------------------------
+    # 2. Public thumbnails – served directly
+    # -------------------------------------------------
+    location /thumbnails/ {
+        alias /home/hridoy/Secret_Project/server/object-storage/videos/;
+        location ~* \.(jpg|jpeg|png|gif|webp)$ {
+            expires 1d;
+            add_header Cache-Control "public, immutable";
+            access_log off;
+            log_not_found off;
+        }
+        location ~* \.(mp4|webm|mkv|mov)$ {
+            return 404;
+        }
+    }
+
+    # -------------------------------------------------
+    # 3. Public user avatars – served directly
+    # -------------------------------------------------
+    location /users/ {
+        alias /home/hridoy/Secret_Project/server/object-storage/users/;
+        
+        # Only allow image assets
+        location ~* \.(jpg|jpeg|png|gif|webp)$ {
+            expires 1d;
+            add_header Cache-Control "public, max-age=86400";
+            access_log off;
+            log_not_found off;
+        }
+
+        # Block direct access to non-image formats inside user storage
+        location ~* \.(php|sh|exe|json|js)$ {
+            return 403;
+        }
+    }
+
+    # -------------------------------------------------
+    # 4. Video watch endpoint – passes to Node (range handling)
+    #    (unchanged – progressive MP4 still works via your app)
+    # -------------------------------------------------
+    location /watch/ {
+        proxy_pass         http://node_app;
+        proxy_http_version 1.1;
+        proxy_set_header   Connection "";
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_buffering        on;
+        proxy_buffer_size      8k;
+        proxy_buffers          8 8k;
+        proxy_busy_buffers_size 16k;
+        proxy_set_header Range $http_range;
+        proxy_set_header If-Range $http_if_range;
+    }
+
+    # -------------------------------------------------
+    # 5. HLS Adaptive Bitrate Streaming (NEW)
+    #    Serves master.m3u8 + variant playlists + .ts segments
+    #    Client (hls.js / native Safari) picks the best quality
+    #    based on network conditions.
+    #
+    #    URL examples:
+    #      /hls/{videoId}/master.m3u8
+    #      /hls/{videoId}/720p/index.m3u8
+    #      /hls/{videoId}/720p/seg_000.ts
+    # -------------------------------------------------
+    location /hls/ {
+        alias /home/hridoy/Secret_Project/server/object-storage/videos/;
+
+        # CORS – required if your frontend is on a different origin
+        add_header Access-Control-Allow-Origin  * always;
+        add_header Access-Control-Allow-Methods "GET, HEAD, OPTIONS" always;
+        add_header Access-Control-Allow-Headers "Range, Origin, Accept, Content-Type" always;
+        add_header Access-Control-Expose-Headers "Content-Length, Content-Range" always;
+
+        if ($request_method = OPTIONS) {
+            return 204;
+        }
+
+        # Master & variant playlists
+        location ~* \.m3u8$ {
+            add_header Cache-Control "public, max-age=5";          # short cache – may be updated
+            add_header Access-Control-Allow-Origin * always;
+            add_header Access-Control-Expose-Headers "Content-Length" always;
+            types {
+                application/vnd.apple.mpegurl m3u8;
+            }
+            default_type application/vnd.apple.mpegurl;
+            access_log off;
+        }
+
+        # Media segments
+        location ~* \.ts$ {
+            add_header Cache-Control "public, max-age=31536000, immutable";
+            add_header Access-Control-Allow-Origin * always;
+            types {
+                video/mp2t ts;
+            }
+            default_type video/mp2t;
+            access_log off;
+            log_not_found off;
+        }
+
+        # Block everything else under /hls/ (no raw mp4, no scripts, etc.)
+        location ~* \.(mp4|webm|mkv|mov|php|sh|exe|json|js|html)$ {
+            return 404;
+        }
+    }
+
+    # -------------------------------------------------
+    # 6. Everything else → Node.js
+    # -------------------------------------------------
+    location / {
+        proxy_pass         http://node_app;
+        proxy_http_version 1.1;
+        proxy_set_header   Connection "";
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        client_max_body_size 500m;
+    }
+}
